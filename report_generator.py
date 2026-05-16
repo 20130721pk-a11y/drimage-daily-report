@@ -56,13 +56,16 @@ def calc_sentiment_ratio(posts: list) -> str:
 
 
 def filter_own(posts_or_news: list, brand_key: str, field: str = "title") -> list:
-    """자사 브랜드 키워드로 항목 필터링"""
+    """자사 브랜드 키워드로 항목 필터링 (title / content / summary 모두 검색)"""
     kws = OWN_KEYWORDS.get(brand_key, [])
-    return [
-        item for item in posts_or_news
-        if any(kw.lower() in (item.get(field, "") or "").lower() for kw in kws)
-        or any(kw.lower() in (item.get("content", "") or "").lower() for kw in kws)
-    ]
+    def matches(item):
+        search_text = " ".join([
+            (item.get("title", "") or ""),
+            (item.get("content", "") or ""),
+            (item.get("summary", "") or ""),
+        ]).lower()
+        return any(kw.lower() in search_text for kw in kws)
+    return [item for item in posts_or_news if matches(item)]
 
 
 def get_date_range():
@@ -84,28 +87,28 @@ def fetch_data(supabase: Client) -> dict:
 
     news = (
         supabase.table("news")
-        .select("id, title, content, url, source, published_at, category")
+        .select("id, title, summary, url, source, published_at, collected_at, category, tags")
         .gte("published_at", start)
         .lte("published_at", end)
         .execute()
     )
     streams = (
         supabase.table("streams")
-        .select("id, title, channel_name, platform, url, started_at, viewer_count, collected_at")
+        .select("id, title, channel_name, platform, url, started_at, viewer_count, collected_at, category, tags, is_live")
         .gte("started_at", start)
         .lte("started_at", end)
         .execute()
     )
     community_posts = (
         supabase.table("community_posts")
-        .select("id, title, content, url, community, sentiment, keyword, posted_at, collected_at, category")
+        .select("id, title, content, url, community, sentiment, sentiment_reason, keyword, posted_at, collected_at, category, views, comments")
         .gte("collected_at", start)
         .lte("collected_at", end)
         .execute()
     )
     competitor_ads = (
         supabase.table("competitor_ads")
-        .select("id, platform, competitor, title, ad_type, region, published_at, collected_at")
+        .select("id, platform, competitor, title, description, ad_type, region, published_at, collected_at, views")
         .gte("collected_at", seven_days_ago)
         .execute()
     )

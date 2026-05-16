@@ -6,7 +6,7 @@ import os
 import sys
 from supabase import create_client
 
-from report_generator import fetch_data, generate_report_with_claude, build_html_email
+from report_generator import fetch_data, generate_report, build_html_email
 from email_sender import send_email
 
 
@@ -29,9 +29,9 @@ def main():
     data = fetch_data(supabase)
 
     # 2) Claude로 리포트 생성
-    print("[Claude API] 리포트 생성 중...")
-    report_json = generate_report_with_claude(data)
-    print("[Claude API] 생성 완료")
+    print("[리포트 생성] 데이터 집계 중...")
+    report_json = generate_report(data)
+    print("[리포트 생성] 완료")
 
     # 3) HTML 이메일 빌드
     html = build_html_email(report_json, data["date_label"])

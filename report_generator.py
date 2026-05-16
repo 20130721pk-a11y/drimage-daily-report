@@ -15,7 +15,6 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from collections import Counter
 from supabase import create_client, Client
-import anthropic
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -180,130 +179,143 @@ def fetch_data(supabase: Client) -> dict:
     return result
 
 
-def generate_report_with_claude(data: dict) -> dict:
-    """Claude API로 리포트 각 섹션 생성"""
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    date_label   = data["date_label"]
-    own_stats    = data["own_stats"]
-    ads_stats    = data["ads_stats"]
-    sent_stats   = data["sentiment_stats"]
+def generate_report(data: dict) -> dict:
+    """순수 Python 집계로 리포트 데이터 생성 (Claude API 불필요)"""
+    own_stats  = data["own_stats"]
+    ads_stats  = data["ads_stats"]
+    sent_stats = data["sentiment_stats"]
+    news       = data["news"]
+    posts      = data["community_posts"]
+    ads        = data["competitor_ads"]
 
-    # Claude에게 넘길 데이터 (토큰 절감: 전처리 통계 + 샘플만)
-    prompt_data = {
-        "date":         date_label,
-        "own_stats":    own_stats,       # 자사 언급량 + 감성 (이미 계산됨)
-        "ads_stats":    ads_stats,       # 광고 통계 (이미 계산됨)
-        "sentiment_stats": sent_stats,  # 전체 감성 비율 (이미 계산됨)
-        # Claude가 분석할 샘플 데이터
-        "news_sample":        data["news"][:25],
-        "community_sample":   data["community_posts"][:40],
-        "streams_sample":     data["streams"][:15],
-        "competitor_ads_sample": data["competitor_ads"][:30],
+    # ── 경쟁사 언급량 집계 (뉴스 + 커뮤니티 키워드 검색) ──────────
+    COMP_KEYWORDS = {
+        "오버워치2":      ["오버워치", "overwatch", "OW2"],
+        "에이펙스 레전드": ["에이펙스", "apex"],
+        "발로란트":       ["발로란트", "valorant"],
+        "포트나이트":     ["포트나이트", "fortnite"],
+        "배틀그라운드":   ["배틀그라운드", "pubg", "배그"],
+        "이터널리턴":     ["이터널리턴", "eternal return"],
+        "리그오브레전드": ["리그오브레전드", "롤", " lol ", "league of legends"],
+    }
+    COMP_COMPANY = {
+        "오버워치2": "Blizzard", "에이펙스 레전드": "EA",
+        "발로란트": "Riot Games", "포트나이트": "Epic Games",
+        "배틀그라운드": "Krafton", "이터널리턴": "Nimble Neuron",
+        "리그오브레전드": "Riot Games",
     }
 
-    system_prompt = """당신은 게임 업계 마케팅 애널리스트입니다.
-드림에이지 내부 보고용 일일 리포트를 작성합니다.
+    def count_mentions(items, keywords, fields=("title","summary","content")):
+        cnt = 0
+        for item in items:
+            text = " ".join((item.get(f,"") or "") for f in fields).lower()
+            if any(kw.lower() in text for kw in keywords):
+                cnt += 1
+        return cnt
 
-규칙:
-- 간결하고 데이터 중심으로 작성 (수치 반드시 명시)
-- 한국어로 작성
-- 없는 데이터는 '데이터 없음'으로 표기 (절대 추측하지 말 것)
-- own_stats / ads_stats / sentiment_stats는 이미 계산된 값이므로 그대로 사용할 것
-- 순수 JSON만 반환 (마크다운 코드블록, 설명 텍스트 없이)"""
+    competitors = []
+    for game, kws in COMP_KEYWORDS.items():
+        n = count_mentions(news, kws) + count_mentions(posts, kws)
+        competitors.append({
+            "name": game,
+            "company": COMP_COMPANY[game],
+            "total_mentions": n,
+            "highlight": "특이사항 없음",
+        })
+    competitors.sort(key=lambda x: x["total_mentions"], reverse=True)
 
-    user_prompt = f"""== 사전 계산된 통계 및 샘플 데이터 ==
-{json.dumps(prompt_data, ensure_ascii=False, indent=2)}
+    # ── 자사 동향 요약 (상위 뉴스 제목 나열) ────────────────────────
+    def own_summary(brand_key):
+        titles = own_stats[brand_key].get("news_titles", []) + own_stats[brand_key].get("post_titles", [])
+        if not titles:
+            return "언급 없음"
+        return " / ".join(titles[:3])
 
-== 자사 정보 ==
-자사: 드림에이지(dreamage), 아키텍트/Arkheron(arkheron), 알케론(alcheron)
+    # ── 부정 키워드 집계 ─────────────────────────────────────────
+    neg_posts = [p for p in posts if p.get("sentiment") == SENTIMENT_NEGATIVE]
+    kw_counter = Counter()
+    for p in neg_posts:
+        kw = p.get("keyword", "")
+        if kw:
+            for k in str(kw).split(","):
+                k = k.strip()
+                if k:
+                    kw_counter[k] += 1
+    negative_keywords = [k for k, _ in kw_counter.most_common(5)]
 
-== 경쟁사 정보 (DB 실제 competitor 값) ==
-- "Blizzard(오버워치2)" → 오버워치2 / Blizzard
-- "EA(에이펙스 레전드)" → 에이펙스 레전드 / EA
-- "Riot Games(발로란트)" → 발로란트 / Riot Games
-- "Epic Games(포트나이트)" → 포트나이트 / Epic Games
-- "Krafton(배틀그라운드)" → 배틀그라운드 / Krafton
-- "Nimble Neuron(이터널리턴)" → 이터널리턴 / Nimble Neuron
-- "Riot Games(리그오브레전드)" → 리그오브레전드 / Riot Games
-
-== 요청 ==
-아래 JSON 구조로만 응답하세요:
-{{
-  "summary_3": [
-    "핵심 요약 1 (수치 포함, 예: '발로란트 커뮤니티 부정 감성 +23% 급증')",
-    "핵심 요약 2",
-    "핵심 요약 3"
-  ],
-  "own_company": {{
-    "dreamage": {{
-      "news": {own_stats['dreamage']['news_cnt']},
-      "community": {own_stats['dreamage']['post_cnt']},
-      "stream": {own_stats['dreamage']['stream_cnt']},
-      "sentiment": "{own_stats['dreamage']['sentiment']}",
-      "summary": "주요 언급 내용 1~2문장 (없으면 '언급 없음')"
-    }},
-    "arkheron": {{
-      "news": {own_stats['arkheron']['news_cnt']},
-      "community": {own_stats['arkheron']['post_cnt']},
-      "stream": {own_stats['arkheron']['stream_cnt']},
-      "sentiment": "{own_stats['arkheron']['sentiment']}",
-      "summary": "주요 언급 내용 1~2문장"
-    }},
-    "alcheron": {{
-      "news": {own_stats['alcheron']['news_cnt']},
-      "community": {own_stats['alcheron']['post_cnt']},
-      "stream": {own_stats['alcheron']['stream_cnt']},
-      "sentiment": "{own_stats['alcheron']['sentiment']}",
-      "summary": "주요 언급 내용 1~2문장"
-    }}
-  }},
-  "competitors": [
-    {{
-      "name": "게임명 (위 경쟁사 목록 참고)",
-      "company": "개발사명",
-      "total_mentions": 0,
-      "highlight": "주목 이슈 1줄 요약 (없으면 '특이사항 없음')"
-    }}
-  ],
-  "ads": {{
-    "by_region": {json.dumps({"KR": ads_stats['by_region'].get('KR',0), "US": ads_stats['by_region'].get('US',0), "JP": ads_stats['by_region'].get('JP',0), "TW": ads_stats['by_region'].get('TW',0), "GB": ads_stats['by_region'].get('GB',0), "DE": ads_stats['by_region'].get('DE',0), "BR": ads_stats['by_region'].get('BR',0)})},
-    "top_advertiser": "{ads_stats['top_advertiser']}",
-    "type_dist": {json.dumps(dict(ads_stats['by_type']))}
-  }},
-  "sentiment": {{
-    "own_total": "{sent_stats['own_total']}",
-    "competitor_total": "{sent_stats['competitor_total']}",
-    "negative_keywords": ["부정 반응 관련 키워드 최대 5개 (community_sample의 keyword 필드 참고)"],
-    "community_highlights": [
-      {{"community": "커뮤니티명 (인벤/루리웹/디시 등)", "reaction": "주요 반응 1줄"}}
+    # ── 커뮤니티별 반응 ──────────────────────────────────────────
+    comm_counter = Counter(p.get("community","") for p in posts if p.get("community"))
+    community_highlights = [
+        {"community": comm, "reaction": f"게시글 {cnt}건 수집"}
+        for comm, cnt in comm_counter.most_common(4)
     ]
-  }},
-  "top_news": [
-    {{
-      "title": "뉴스 제목",
-      "source": "출처",
-      "summary": "한 줄 요약",
-      "url": "URL"
-    }}
-  ]
-}}"""
 
-    response = client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=4000,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}],
+    # ── 주목 뉴스 상위 5건 ───────────────────────────────────────
+    top_news = [
+        {
+            "title":   n.get("title", ""),
+            "source":  n.get("source", ""),
+            "summary": n.get("summary", "")[:60] + "..." if n.get("summary","") and len(n.get("summary","")) > 60 else n.get("summary",""),
+            "url":     n.get("url", "#"),
+        }
+        for n in news[:5]
+    ]
+
+    # ── 오늘의 핵심 요약 3줄 자동 생성 ──────────────────────────
+    top_comp = competitors[0] if competitors else {}
+    own_total_cnt = sum(
+        own_stats[b]["news_cnt"] + own_stats[b]["post_cnt"] + own_stats[b]["stream_cnt"]
+        for b in ["dreamage","arkheron","alcheron"]
     )
+    summary_3 = [
+        f"전체 수집 데이터: 뉴스 {len(news)}건 · 커뮤니티 {len(posts)}건 · 방송 {len(data['streams'])}건 · 광고 {len(ads)}건",
+        f"경쟁사 언급량 1위: {top_comp.get('name','—')} {top_comp.get('total_mentions',0)}건 ({top_comp.get('company','—')})",
+        f"자사 전체 언급 {own_total_cnt}건 | 감성 — 자사: {sent_stats['own_total']} / 경쟁사: {sent_stats['competitor_total']}",
+    ]
 
-    raw = response.content[0].text.strip()
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        import re
-        match = re.search(r'\{[\s\S]+\}', raw)
-        if match:
-            return json.loads(match.group())
-        raise
+    # ── 광고 유형 한국어 변환 ────────────────────────────────────
+    type_map = {"video": "동영상", "image": "이미지", "text": "텍스트"}
+    type_dist_kr = {type_map.get(k, k): v for k, v in ads_stats["by_type"].items()}
+
+    return {
+        "summary_3": summary_3,
+        "own_company": {
+            "dreamage": {
+                "news":      own_stats["dreamage"]["news_cnt"],
+                "community": own_stats["dreamage"]["post_cnt"],
+                "stream":    own_stats["dreamage"]["stream_cnt"],
+                "sentiment": own_stats["dreamage"]["sentiment"],
+                "summary":   own_summary("dreamage"),
+            },
+            "arkheron": {
+                "news":      own_stats["arkheron"]["news_cnt"],
+                "community": own_stats["arkheron"]["post_cnt"],
+                "stream":    own_stats["arkheron"]["stream_cnt"],
+                "sentiment": own_stats["arkheron"]["sentiment"],
+                "summary":   own_summary("arkheron"),
+            },
+            "alcheron": {
+                "news":      own_stats["alcheron"]["news_cnt"],
+                "community": own_stats["alcheron"]["post_cnt"],
+                "stream":    own_stats["alcheron"]["stream_cnt"],
+                "sentiment": own_stats["alcheron"]["sentiment"],
+                "summary":   own_summary("alcheron"),
+            },
+        },
+        "competitors": competitors,
+        "ads": {
+            "by_region":     {r: ads_stats["by_region"].get(r, 0) for r in ["KR","US","JP","TW","GB","DE","BR"]},
+            "top_advertiser": ads_stats["top_advertiser"],
+            "type_dist":     type_dist_kr,
+        },
+        "sentiment": {
+            "own_total":           sent_stats["own_total"],
+            "competitor_total":    sent_stats["competitor_total"],
+            "negative_keywords":   negative_keywords,
+            "community_highlights": community_highlights,
+        },
+        "top_news": top_news,
+    }
 
 
 def build_html_email(report: dict, date_label: str) -> str:

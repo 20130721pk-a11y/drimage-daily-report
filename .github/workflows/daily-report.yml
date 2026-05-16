@@ -29,5 +29,5 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-          REPORT_RECIPIENT: "moon.k@hybecorp.com"
+          REPORT_RECIPIENT: "20130721pk@gmail.com"
         run: python main.py

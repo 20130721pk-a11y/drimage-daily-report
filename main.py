@@ -16,7 +16,7 @@ def main():
     print("=" * 50)
 
     # 환경변수 체크
-    required_vars = ["SUPABASE_URL", "SUPABASE_KEY", "ANTHROPIC_API_KEY", "GMAIL_USER", "GMAIL_APP_PASSWORD"]
+    required_vars = ["SUPABASE_URL", "SUPABASE_KEY", "GMAIL_USER", "GMAIL_APP_PASSWORD"]
     missing = [v for v in required_vars if not os.environ.get(v)]
     if missing:
         print(f"[오류] 누락된 환경변수: {', '.join(missing)}")
